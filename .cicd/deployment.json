@@ -1,0 +1,253 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "baseName": {
+      "type": "string",
+      "metadata": {
+        "description": "The base name to be applied"
+      }
+    },
+    "additionalAADObjectIds": {
+      "type": "array",
+      "metadata": {
+        "description": "The list of additional object ids to be added to the resources"
+      },
+      "defaultValue": []
+    },
+    "domainName": {
+      "type": "string",
+      "metadata": {
+        "description": "The custom domain to use in the Azure function"
+      }
+    }
+  },
+  "functions": [
+    {
+      "namespace": "custom",
+      "members": {
+        "getAccessPolicies": {
+          "parameters": [
+            {
+              "name": "objectId",
+              "type": "string"
+            }
+          ],
+          "output": {
+            "type": "object",
+            "value": {
+              "tenantId": "[subscription().tenantId]",
+              "objectId": "[parameters('objectId')]",
+              "permissions": {
+                "secrets": [
+                  "get",
+                  "list"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "variables": {
+    "appPlanName": "[parameters('baseName')]",
+    "storageAccountName": "[parameters('baseName')]",
+    "appInsightsName": "[parameters('baseName')]",
+    "kvName": "[parameters('baseName')]",
+    "fncBotName": "[concat(parameters('baseName'), '-bot')]",
+    "storageAccountRId": "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]",
+    "appPlanRId": "[resourceId('Microsoft.Web/serverfarms', variables('appPlanName'))]",
+    "fncBotRId": "[resourceId('Microsoft.Web/sites', variables('fncBotName'))]",
+    "storageBlobDataContributorRoleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+    "copy": [
+      {
+        "name": "additionalAADSecretContributors",
+        "count": "[length(parameters('additionalAADObjectIds'))]",
+        "input": "[custom.getAccessPolicies(parameters('additionalAADObjectIds')[copyIndex('additionalAADSecretContributors')])]"
+      }
+    ]
+  },
+  "resources": [
+    {
+      "name": "[variables('kvName')]",
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2016-10-01",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "enabledForDeployment": true,
+        "enabledForTemplateDeployment": true,
+        "enabledForDiskEncryption": false,
+        "tenantId": "[subscription().tenantId]",
+        "accessPolicies": [],
+        "sku": {
+          "name": "standard",
+          "family": "A"
+        }
+      }
+    },
+    {
+      "name": "[variables('storageAccountName')]",
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2019-06-01",
+      "location": "[resourceGroup().location]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS",
+        "tier": "Standard"
+      }
+    },
+    {
+      "name": "[variables('appPlanName')]",
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2018-02-01",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "Y1",
+        "tier": "Dynamic",
+        "size": "Y1",
+        "family": "Y",
+        "capacity": 0
+      },
+      "kind": "functionapp,linux",
+      "properties": {
+        "perSiteScaling": false,
+        "maximumElasticWorkerCount": 1,
+        "isSpot": false,
+        "reserved": true,
+        "isXenon": false,
+        "hyperV": false,
+        "targetWorkerCount": 0,
+        "targetWorkerSizeId": 0,
+        "computeMode": "Dynamic"
+      }
+    },
+    {
+      "type": "microsoft.insights/components",
+      "apiVersion": "2018-05-01-preview",
+      "name": "[variables('appInsightsName')]",
+      "location": "[resourceGroup().location]",
+      "kind": "web",
+      "properties": {
+        "Application_Type": "web",
+        "Flow_Type": "Bluefield",
+        "Request_Source": "rest",
+        "RetentionInDays": 90,
+        "publicNetworkAccessForIngestion": "Enabled",
+        "publicNetworkAccessForQuery": "Enabled"
+      }
+    },
+    {
+      "name": "[variables('fncBotName')]",
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2018-11-01",
+      "location": "[resourceGroup().location]",
+      "kind": "functionapp",
+      "dependsOn": [
+        "[variables('appPlanRId')]",
+        "[variables('storageAccountRId')]"
+      ],
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "serverFarmId": "[variables('appPlanRId')]",
+        "siteConfig": {
+          "linuxFxVersion": "python|3.8",
+          "appSettings": [
+            {
+              "name": "AzureWebJobsStorage",
+              "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', variables('storageAccountName'), ';AccountKey=', listKeys(variables('storageAccountRId'),'2015-05-01-preview').key1)]"
+            },
+            {
+              "name": "FUNCTIONS_EXTENSION_VERSION",
+              "value": "~3"
+            },
+            {
+              "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
+              "value": "[reference(resourceId('microsoft.insights/components/', variables('appInsightsName')), '2015-05-01').InstrumentationKey]"
+            },
+            {
+              "name": "FUNCTIONS_WORKER_RUNTIME",
+              "value": "python"
+            },
+            {
+              "name": "cfg-config-core-mainstorage",
+              "value": "[variables('storageAccountName')]"
+            },
+            {
+              "name": "cfg-config-core-mainkeyvault",
+              "value": "[variables('kvName')]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/providers/roleAssignments",
+      "apiVersion": "2018-01-01-preview",
+      "name": "[concat(variables('storageAccountName'), '/Microsoft.Authorization/', guid(concat(resourceGroup().id, variables('storageAccountName'), variables('fncBotName'))))]",
+      "dependsOn": [
+        "[variables('fncBotRId')]",
+        "[variables('storageAccountRId')]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[concat(variables('storageAccountRId'), '/providers/Microsoft.Authorization/roleDefinitions/', variables('storageBlobDataContributorRoleId'))]",
+        "principalId": "[reference(variables('fncBotRId'), '2018-11-01', 'Full').identity.principalId]",
+        "scope": "[variables('storageAccountRId')]"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/providers/roleAssignments",
+      "apiVersion": "2018-01-01-preview",
+      "name": "[concat(variables('storageAccountName'), '/Microsoft.Authorization/', guid(concat(resourceGroup().id, variables('storageAccountName'), parameters('additionalAADObjectIds')[copyIndex('storageRoleAssignments')])))]",
+      "dependsOn": [
+        "[variables('storageAccountRId')]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[concat(variables('storageAccountRId'), '/providers/Microsoft.Authorization/roleDefinitions/', variables('storageBlobDataContributorRoleId'))]",
+        "principalId": "[parameters('additionalAADObjectIds')[copyIndex('storageRoleAssignments')]]",
+        "scope": "[variables('storageAccountRId')]"
+      },
+      "copy": {
+        "name": "storageRoleAssignments",
+        "count": "[length(parameters('additionalAADObjectIds'))]"
+      }
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/accessPolicies",
+      "name": "[concat(variables('kvName'), '/add')]",
+      "apiVersion": "2016-10-01",
+      "properties": {
+        "accessPolicies": "[concat(createArray(custom.getAccessPolicies(reference(variables('fncBotRId'), '2018-11-01', 'Full').identity.principalId)), variables('additionalAADSecretContributors'))]"
+      }
+    },
+    {
+      "type": "Microsoft.Web/certificates",
+      "apiVersion": "2018-11-01",
+      "name": "[concat(parameters('domainName'), '-', variables('fncBotName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('fncBotName'))]"
+      ],
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "canonicalName": "[parameters('domainName')]",
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('appPlanName'))]"
+      }
+    },
+    {
+      "type": "Microsoft.Web/sites/hostNameBindings",
+      "apiVersion": "2018-11-01",
+      "name": "[concat(variables('fncBotName'), '/', parameters('domainName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('fncBotName'))]",
+        "[resourceId('Microsoft.Web/certificates', concat(parameters('domainName'), '-', variables('fncBotName')))]"
+      ],
+      "properties": {
+        "sslState": "SniEnabled",
+        "thumbprint": "[reference(resourceId('Microsoft.Web/certificates', concat(parameters('domainName'), '-', variables('fncBotName')))).Thumbprint]"
+      }
+    }
+  ],
+  "outputs": {}
+}

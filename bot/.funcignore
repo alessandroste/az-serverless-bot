@@ -1,0 +1,6 @@
+.git*
+.vscode
+local.settings.json
+.venv
+setup*
+requirements-dev.txt
